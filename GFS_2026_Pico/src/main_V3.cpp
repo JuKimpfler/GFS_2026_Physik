@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include "HX711.h"
 #include "AccelLink_RX.h"
+#include "BotConnect.h"
 
 // ── HX711 pin configuration (unchanged from original) ─────────
 #define HX711_DOUT  4
@@ -36,7 +37,10 @@ static void triggerFullCalibration() {
 // ── Arduino setup ─────────────────────────────────────────────
 void setup() {
     Serial.begin(115200);
-    while (!Serial && millis() < 3000);
+    Serial1.begin(115200);
+    BC.begin(Serial1);
+
+    delay(10000);
 
     Serial.println("Raspberry Pi Pico – Beschleunigungssensor");
     Serial.println("=========================================");
@@ -77,6 +81,7 @@ void setup() {
 
 // ── Arduino main loop ─────────────────────────────────────────
 void loop() {
+    BC.process();
     static uint32_t lastPrint = 0;
     const uint32_t PRINT_INTERVAL_MS = 20;   // match Arduino send rate
 
@@ -104,6 +109,9 @@ void loop() {
 
     // ── CSV output ────────────────────────────────────────────
     float time_s = now / 1000.0f;
+    BC.sendTelemetryFloat("IMU-Acceleration",imu_y);
+    BC.sendTelemetryFloat("DIY-Acceleration",accel_diy);
+    BC.sendTelemetryFloat("Diff",diff);
     Serial.print(time_s, 3);   Serial.print(", ");
     Serial.print(force_N, 4);  Serial.print(", ");
     Serial.print(accel_diy, 4); Serial.print(", ");

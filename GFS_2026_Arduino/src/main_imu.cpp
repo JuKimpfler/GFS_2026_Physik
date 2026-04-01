@@ -53,7 +53,8 @@ static void calibrateIMU() {
 // ── Arduino setup ─────────────────────────────────────────────
 void setup() {
     Serial.begin(115200);
-    while (!Serial && millis() < 3000);
+    
+    delay(10000);
 
     // Initialise the AccelLink transmitter
     AccelTX.begin(ACCELLINK_DATA_PIN, ACCELLINK_CAL_PIN);
