@@ -45,8 +45,15 @@ void setup() {
     Serial.println("Raspberry Pi Pico – Beschleunigungssensor");
     Serial.println("=========================================");
 
-    // Initialise AccelLink receiver (interrupt on GPIO2, cal output on GPIO3)
+    // Initialise AccelLink receiver (PIO UART on GPIO2, cal output on GPIO3)
     AccelRX.begin(ACCELLINK_DATA_PIN, ACCELLINK_CAL_PIN);
+    if (!AccelRX.isReady()) {
+        Serial.println("FEHLER: AccelLink RX (SerialPIO) konnte nicht initialisiert werden!");
+        while (true) {
+            digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
+            delay(200);
+        }
+    }
     Serial.println("AccelLink RX bereit (GPIO2=Daten, GPIO3=Cal-Out).");
 
     // Initialise HX711
@@ -82,6 +89,7 @@ void setup() {
 // ── Arduino main loop ─────────────────────────────────────────
 void loop() {
     BC.process();
+    AccelRX.update();   // drain PIO FIFO and parse incoming packets
     static uint32_t lastPrint = 0;
     const uint32_t PRINT_INTERVAL_MS = 20;   // match Arduino send rate
 

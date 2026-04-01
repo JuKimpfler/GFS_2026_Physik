@@ -1,28 +1,68 @@
 // ============================================================
-//  AccelLink_RX.cpp – DIY bit-bang UART receiver implementation
+//  AccelLink_RX.cpp -- PIO-UART receiver implementation
 //  See AccelLink_RX.h for protocol details.
 // ============================================================
 
 #include "AccelLink_RX.h"
+#include <new>
 
 AccelLinkRX AccelRX;
 
-// ── Singleton pointer for static ISR wrapper ─────────────────
-static AccelLinkRX *_rxInst = nullptr;
-
-static void _dataISRWrapper() { if (_rxInst) _rxInst->_handleDataISR(); }
-
 // ── Initialisation ────────────────────────────────────────────
 void AccelLinkRX::begin(uint8_t dataPin, uint8_t calPin) {
-    _rxInst  = this;
-    _dataPin = dataPin;
-    _calPin  = calPin;
+    _calPin = calPin;
+    _rxIdx  = 0;
 
-    pinMode(_dataPin, INPUT);
-    pinMode(_calPin,  OUTPUT);
+    // Construct SerialPIO in pre-allocated buffer (RX only, no TX pin needed).
+    _serial = new(_serialBuf) SerialPIO(SerialPIO::NOPIN, dataPin);
+    _serial->begin(ACCELLINK_BAUD);
+
+    pinMode(_calPin, OUTPUT);
     digitalWrite(_calPin, LOW);     // calibration flag idle LOW
+}
 
-    attachInterrupt(digitalPinToInterrupt(_dataPin), _dataISRWrapper, FALLING);
+// ── Public: drain PIO FIFO and parse packets ──────────────────
+void AccelLinkRX::update() {
+    if (!_serial) return;
+
+    while (_serial->available()) {
+        uint8_t b = (uint8_t)_serial->read();
+
+        if (_rxIdx == 0) {
+            // Waiting for SYNC1
+            if (b == ACCELLINK_SYNC1) {
+                _rxBuf[_rxIdx++] = b;
+            }
+        } else if (_rxIdx == 1) {
+            // Waiting for SYNC2
+            if (b == ACCELLINK_SYNC2) {
+                _rxBuf[_rxIdx++] = b;
+            } else if (b == ACCELLINK_SYNC1) {
+                // Consecutive SYNC1 -- keep index at 1, overwrite slot 0
+                _rxBuf[0] = b;
+            } else {
+                // Bad byte -- reset
+                _rxIdx = 0;
+            }
+        } else {
+            // Collecting payload + CRC
+            _rxBuf[_rxIdx++] = b;
+
+            if (_rxIdx == ACCELLINK_PACKET_LEN) {
+                _rxIdx = 0;
+
+                // Validate CRC over the 12 payload bytes [2..13]
+                if (_crc8(&_rxBuf[2], 12) == _rxBuf[14]) {
+                    _valX    = _decodeFloat(&_rxBuf[2]);
+                    _valY    = _decodeFloat(&_rxBuf[6]);
+                    _valZ    = _decodeFloat(&_rxBuf[10]);
+                    _newData = true;
+                }
+                // On CRC mismatch the packet is silently discarded;
+                // the parser will re-sync on the next SYNC1 byte.
+            }
+        }
+    }
 }
 
 // ── Public accessors ──────────────────────────────────────────
@@ -48,106 +88,6 @@ void AccelLinkRX::triggerCalibration(uint32_t pulseDurationMs) {
     digitalWrite(_calPin, HIGH);
     delay(pulseDurationMs);
     digitalWrite(_calPin, LOW);
-}
-
-// ── Data ISR ─────────────────────────────────────────────────
-// Receives the complete 15-byte packet with interrupts disabled.
-// Maximum blocking time: 15 × 10 × ACCELLINK_BIT_US µs = 600 µs @ 250 kbaud.
-void AccelLinkRX::_handleDataISR() {
-    // Prevent re-entry while we are busy receiving.
-    detachInterrupt(digitalPinToInterrupt(_dataPin));
-
-    noInterrupts();
-
-    uint8_t rxBuf[15];
-    bool    valid = true;
-
-    // ── Byte 0: ISR fired at its falling edge ────────────────
-    uint32_t edgeTime = micros();   // ≈ time of the falling edge
-    rxBuf[0] = _receiveByte(_dataPin, edgeTime, valid);
-
-    // ── Bytes 1–14: detect falling edge of each start bit ────
-    for (uint8_t idx = 1; idx < 15 && valid; idx++) {
-        uint32_t deadline = micros() + (uint32_t)ACCELLINK_BYTE_GAP_US;
-
-        // Wait for stop bit of previous byte (pin goes HIGH)
-        while (!digitalRead(_dataPin)) {
-            if (micros() > deadline) { valid = false; break; }
-        }
-        if (!valid) break;
-
-        // Wait for falling edge of next start bit (pin goes LOW)
-        while (digitalRead(_dataPin)) {
-            if (micros() > deadline) { valid = false; break; }
-        }
-        if (!valid) break;
-
-        edgeTime = micros();    // ≈ start of this start bit
-        rxBuf[idx] = _receiveByte(_dataPin, edgeTime, valid);
-    }
-
-    interrupts();
-
-    // ── Validate sync bytes and CRC ──────────────────────────
-    if (valid
-            && rxBuf[0] == ACCELLINK_SYNC1
-            && rxBuf[1] == ACCELLINK_SYNC2
-            && _crc8(&rxBuf[2], 12) == rxBuf[14]) {
-        _valX    = _decodeFloat(&rxBuf[2]);
-        _valY    = _decodeFloat(&rxBuf[6]);
-        _valZ    = _decodeFloat(&rxBuf[10]);
-        _newData = true;
-    }
-    // On sync / CRC mismatch the packet is silently discarded;
-    // the next FALLING edge will re-trigger reception.
-
-    // Re-arm interrupt for next packet.
-    attachInterrupt(digitalPinToInterrupt(_dataPin), _dataISRWrapper, FALLING);
-}
-
-// ── Private: receive one byte ─────────────────────────────────
-// Called with interrupts already disabled.
-// edgeTime: micros() value at/near the falling edge of the start bit.
-uint8_t AccelLinkRX::_receiveByte(uint8_t pin, uint32_t edgeTime, bool &valid) {
-    // Maximum allowed wait: one full byte period = 10 × BIT_US plus a safety margin.
-    const uint32_t maxWait = (uint32_t)ACCELLINK_BIT_US * 12u;
-
-    uint8_t b = 0;
-    for (uint8_t bit = 0; bit < 8; bit++) {
-        // Sample point: centre of each data bit.
-        // Offset from start-bit falling edge:
-        //   skip start bit (1 × BIT_US) + advance to bit centre (+ ½ BIT_US)
-        //   + bit index × BIT_US
-        uint32_t sampleAt = edgeTime
-                            + (uint32_t)ACCELLINK_BIT_US                    // start bit
-                            + ((uint32_t)ACCELLINK_BIT_US >> 1u)            // ½ bit to centre
-                            + (uint32_t)ACCELLINK_BIT_US * (uint32_t)bit;   // bit offset
-
-        // Busy-wait until the sample point is reached.
-        // micros() has 1 µs resolution; a timeout guards against timer wrap-around.
-        uint32_t deadline = edgeTime + maxWait;
-        while (micros() < sampleAt) {
-            if (micros() > deadline) { valid = false; return 0; }
-        }
-
-        if (digitalRead(pin)) {
-            b |= (1u << bit);
-        }
-    }
-
-    // Sanity-check: stop bit should be HIGH.  If not, framing error.
-    uint32_t stopSample = edgeTime
-                          + (uint32_t)ACCELLINK_BIT_US * 9u
-                          + ((uint32_t)ACCELLINK_BIT_US >> 1u);
-    uint32_t deadline = edgeTime + (uint32_t)ACCELLINK_BIT_US * 12u;
-    while (micros() < stopSample) {
-        if (micros() > deadline) { valid = false; return 0; }
-    }
-    if (!digitalRead(pin)) {
-        valid = false;
-    }
-
-    return b;
 }
 
 // ── Private: decode 4-byte payload to float ───────────────────
