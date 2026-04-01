@@ -1,15 +1,119 @@
-#include "Arduino.h"
-#include <Wire.h>
-#define I2C_ADDR 0x08
+#include <Arduino.h>
+#include <Arduino_LSM6DSOX.h>
+#include "AccelLink_TX.h"
 
-void onRequest() {
-  float v = 1.23f;
-  Wire.write((uint8_t*)&v, sizeof(v));
+// ── Pin configuration ─────────────────────────────────────────
+// D18: bit-bang UART data line → Pico GPIO2
+// D19: calibration flag input ← Pico GPIO3
+#define ACCELLINK_DATA_PIN 18
+#define ACCELLINK_CAL_PIN  19
+
+// Send IMU data every 20 ms (50 Hz)
+#define SEND_INTERVAL_MS 20
+
+// ── Calibration offsets ───────────────────────────────────────
+static float offsetX = 0.0f;
+static float offsetY = 0.0f;
+static float offsetZ = 0.0f;
+
+static const uint32_t IMU_SAMPLE_TIMEOUT_MS = 100;
+
+// Average the IMU over N samples to find the resting offset.
+// Assumes the Z-axis is aligned vertically (reads +1 g at rest).
+static void calibrateIMU() {
+    const uint8_t N = 50;
+    float sx = 0.0f, sy = 0.0f, sz = 0.0f;
+    uint8_t count = 0;
+
+    Serial.println("Kalibrierung... Sensor bitte ruhig halten.");
+    for (uint8_t i = 0; i < N; i++) {
+        uint32_t t0 = millis();
+        while (!IMU.accelerationAvailable()) {
+            if (millis() - t0 > IMU_SAMPLE_TIMEOUT_MS) break;
+        }
+        if (IMU.accelerationAvailable()) {
+            float x, y, z;
+            IMU.readAcceleration(x, y, z);
+            sx += x;  sy += y;  sz += z;
+            count++;
+        }
+        delay(10);
+    }
+    if (count > 0) {
+        offsetX =  sx / count;
+        offsetY =  sy / count;
+        offsetZ = (sz / count) - 1.0f;   // remove 1 g gravity (Z must point up)
+    }
+
+    Serial.print("Offsets  X=");  Serial.print(offsetX, 4);
+    Serial.print("  Y=");         Serial.print(offsetY, 4);
+    Serial.print("  Z=");         Serial.println(offsetZ, 4);
 }
 
+// ── Arduino setup ─────────────────────────────────────────────
 void setup() {
-  Wire.begin(I2C_ADDR);
-  Wire.onRequest(onRequest);
+    Serial.begin(115200);
+    while (!Serial && millis() < 3000);
+
+    // Initialise the AccelLink transmitter
+    AccelTX.begin(ACCELLINK_DATA_PIN, ACCELLINK_CAL_PIN);
+
+    // Initialise the IMU
+    if (!IMU.begin()) {
+        Serial.println("FEHLER: LSM6DSOX konnte nicht initialisiert werden!");
+        while (true) {
+            digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
+            delay(200);
+        }
+    }
+
+    Serial.println("IMU bereit.");
+    Serial.print("Abtastrate: ");
+    Serial.print(IMU.accelerationSampleRate());
+    Serial.println(" Hz");
+    pinMode(LED_BUILTIN, OUTPUT);
+
+    // Perform initial calibration
+    delay(500);
+    calibrateIMU();
+    Serial.println("Bereit – sende Beschleunigungsdaten.");
 }
 
-void loop() {}
+// ── Arduino main loop ─────────────────────────────────────────
+void loop() {
+    static uint32_t lastSend = 0;
+    uint32_t now = millis();
+
+    // ── Check calibration flag from Pico ─────────────────────
+    // The Pico pulses GPIO3 HIGH to request an IMU re-calibration.
+    if (AccelTX.getCalFlag()) {
+        Serial.println("Kalibrierungssignal vom Pico empfangen.");
+        calibrateIMU();
+        Serial.println("Bereit – sende weiter.");
+    }
+
+    if (now - lastSend >= SEND_INTERVAL_MS) {
+        lastSend = now;
+
+        if (IMU.accelerationAvailable()) {
+            float rx, ry, rz;
+            IMU.readAcceleration(rx, ry, rz);
+
+            // Remove resting offsets
+            float ax = (rx - offsetX) * 9.81f;   // convert g → m/s²
+            float ay = (ry - offsetY) * 9.81f;
+            float az = (rz - offsetZ) * 9.81f;
+
+            // Transmit via AccelLink (~600 µs)
+            AccelTX.sendValues(ax, ay, az);
+
+            // LED heartbeat
+            digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
+
+            // USB-serial debug output
+            Serial.print("ax="); Serial.print(ax, 4);
+            Serial.print(" ay="); Serial.print(ay, 4);
+            Serial.print(" az="); Serial.println(az, 4);
+        }
+    }
+}

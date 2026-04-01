@@ -1,68 +1,117 @@
-#include "Arduino.h"
-#include "Wire.h"
+#include <Arduino.h>
+#include "HX711.h"
+#include "AccelLink_RX.h"
 
+// ── HX711 pin configuration (unchanged from original) ─────────
+#define HX711_DOUT  4
+#define HX711_SCK   5
 
-void scanI2C(long frequency){
-  String normal = "standard mode (100 kHz):";
-  String fast = "fast mode (400 kHz):";
-  String fastPlus = "fast mode plus (1 MHz):";
-  String highSpeed = "high speed mode (3.4 MHz):";
-  String ultraSpeed = "ultra fast mode (5.0 MHz):";
-  String defaultStr = " !!!!! Unzulässige Frequenz !!!!!";
-  bool error = true;
-  bool addressFound = false;
-  Serial.print("Scanne im ");
-  switch(frequency){
-    case 100000:
-      Serial.println(normal);
-      break;
-    case 400000:
-      Serial.println(fast);
-      break;
-    case 1000000:
-      Serial.println(fastPlus);
-      break;
-    case 3400000:
-      Serial.println(highSpeed);
-      break;
-    case 5000000:
-      Serial.println(ultraSpeed);
-      break;
-    default:
-      Serial.println(defaultStr);
-      break;
-  }
-  
-  Wire.setClock(frequency);
-  for(int i=1; i<128; i++){
-    Wire.beginTransmission(i);
-    error = Wire.endTransmission();
-    if(error == 0){
-      addressFound = true;
-      Serial.print("0x");
-      Serial.println(i,HEX);
+// ── AccelLink pin configuration ───────────────────────────────
+// GPIO2: data line from Arduino D18
+// GPIO3: calibration flag output → Arduino D19
+#define ACCELLINK_DATA_PIN 2
+#define ACCELLINK_CAL_PIN  3
+
+// ── Physical parameter ────────────────────────────────────────
+// Mass of the pendulum / proof-mass in kg.  Set to your actual mass.
+// Must be > 0 to avoid division-by-zero in acceleration calculation.
+static float MASS_KG = 0.100f;
+
+// ── HX711 scale factor (raw → Newton).  Calibrate experimentally. ──
+static float SCALE_FACTOR = 1.0f;
+
+// ── Objects ───────────────────────────────────────────────────
+HX711 scale;
+
+// ── Helper: trigger calibration on both sensors ───────────────
+// Pulses GPIO3 HIGH (→ Arduino re-calibrates IMU) and
+// simultaneously re-tares the local HX711.
+static void triggerFullCalibration() {
+    Serial.println("Kalibrierung beider Sensoren...");
+    scale.tare(10);                         // re-tare HX711 first
+    AccelRX.triggerCalibration(10);         // then signal Arduino
+    Serial.println("Tarierung abgeschlossen.");
+}
+
+// ── Arduino setup ─────────────────────────────────────────────
+void setup() {
+    Serial.begin(115200);
+    while (!Serial && millis() < 3000);
+
+    Serial.println("Raspberry Pi Pico – Beschleunigungssensor");
+    Serial.println("=========================================");
+
+    // Initialise AccelLink receiver (interrupt on GPIO2, cal output on GPIO3)
+    AccelRX.begin(ACCELLINK_DATA_PIN, ACCELLINK_CAL_PIN);
+    Serial.println("AccelLink RX bereit (GPIO2=Daten, GPIO3=Cal-Out).");
+
+    // Initialise HX711
+    scale.begin(HX711_DOUT, HX711_SCK);
+    delay(500);
+
+    if (scale.is_ready()) {
+        Serial.println("HX711 gefunden.");
+        Serial.println("Tarierung... Bitte System ruhig halten.");
+        scale.tare(20);
+        scale.set_scale(SCALE_FACTOR);
+        Serial.println("Tarierung abgeschlossen.");
+    } else {
+        Serial.println("WARNUNG: HX711 nicht bereit!");
     }
-  }
-  if(!addressFound){
-    Serial.println("Keine Adresse erkannt");
-  }
-  Serial.println();
+
+    if (MASS_KG <= 0.0f) {
+        Serial.println("WARNUNG: MASS_KG ist 0 oder negativ – Beschleunigung kann nicht berechnet werden!");
+    }
+
+    // Trigger initial calibration: re-tare HX711 and tell Arduino to
+    // calibrate its IMU at the same time.
+    delay(500);
+    triggerFullCalibration();
+
+    Serial.println();
+    Serial.println("Zeit_s, Kraft_N, Accel_DIY_ms2, Accel_IMU_X, Accel_IMU_Y, Accel_IMU_Z, Diff");
+    Serial.println("----------------------------------------------------------------------------");
+
+    pinMode(LED_BUILTIN, OUTPUT);
 }
 
-void setup(){
-  Wire.begin();
-  Serial.begin(115200);
-  Serial.println("I2C Scanner ist bereit.");
-  Serial.println();
-}
+// ── Arduino main loop ─────────────────────────────────────────
 void loop() {
-  scanI2C(100000);
-  scanI2C(400000);
-  scanI2C(1000000); // nur aktivieren, wenn der Microcontroller diese Frequenz unterstützt
-//  scanI2C(3400000); // nur aktivieren, wenn der Microcontroller diese Frequenz unterstützt
-//  scanI2C(5000000); // nur aktivieren, wenn der Microcontroller diese Frequenz unterstützt
-  
-  Serial.println("****************************");
-  Serial.println();
-  delay(3000);
+    static uint32_t lastPrint = 0;
+    const uint32_t PRINT_INTERVAL_MS = 20;   // match Arduino send rate
+
+    uint32_t now = millis();
+    if (now - lastPrint < PRINT_INTERVAL_MS) return;
+    lastPrint = now;
+
+    // ── Read HX711 (DIY accelerometer) ───────────────────────
+    float force_N   = 0.0f;
+    float accel_diy = 0.0f;
+    if (scale.is_ready()) {
+        force_N   = scale.get_units(1);
+        accel_diy = (MASS_KG > 0.0f) ? (force_N / MASS_KG) : 0.0f;
+    }
+
+    // ── Read AccelLink IMU data ───────────────────────────────
+    float imu_x = 0.0f, imu_y = 0.0f, imu_z = 0.0f;
+    if (AccelRX.hasNewData()) {
+        imu_x = AccelRX.getX();   // clears hasNewData flag
+        imu_y = AccelRX.getY();
+        imu_z = AccelRX.getZ();
+    }
+
+    float diff = accel_diy - imu_x;
+
+    // ── CSV output ────────────────────────────────────────────
+    float time_s = now / 1000.0f;
+    Serial.print(time_s, 3);   Serial.print(", ");
+    Serial.print(force_N, 4);  Serial.print(", ");
+    Serial.print(accel_diy, 4); Serial.print(", ");
+    Serial.print(imu_x, 4);   Serial.print(", ");
+    Serial.print(imu_y, 4);   Serial.print(", ");
+    Serial.print(imu_z, 4);   Serial.print(", ");
+    Serial.println(diff, 4);
+
+    // LED heartbeat
+    digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
 }
