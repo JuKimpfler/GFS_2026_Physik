@@ -58,6 +58,13 @@ void setup() {
 
     // Initialise the AccelLink transmitter
     AccelTX.begin(ACCELLINK_DATA_PIN, ACCELLINK_CAL_PIN);
+    if (!AccelTX.isReady()) {
+        Serial.println("FEHLER: AccelLink TX (SerialPIO) konnte nicht initialisiert werden!");
+        while (true) {
+            digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
+            delay(200);
+        }
+    }
 
     // Initialise the IMU
     if (!IMU.begin()) {

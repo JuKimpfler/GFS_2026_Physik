@@ -1,10 +1,11 @@
 // ============================================================
-//  AccelLink_TX.cpp – DIY bit-bang UART transmitter implementation
+//  AccelLink_TX.cpp – PIO-UART transmitter implementation
 //  See AccelLink_TX.h for protocol details.
 // ============================================================
 
 #include "AccelLink_TX.h"
 #include <math.h>
+#include <new>
 
 AccelLinkTX AccelTX;
 
@@ -16,17 +17,20 @@ static void _calISRWrapper() { if (_txInst) _txInst->_handleCalISR(); }
 // ── Initialisation ────────────────────────────────────────────
 void AccelLinkTX::begin(uint8_t dataPin, uint8_t calPin) {
     _txInst  = this;
-    _dataPin = dataPin;
     _calPin  = calPin;
-    pinMode(_dataPin, OUTPUT);
-    digitalWrite(_dataPin, HIGH);   // idle HIGH (UART convention)
-    pinMode(_calPin, INPUT);        // calibration flag input from Pico
 
+    // Construct SerialPIO in pre-allocated buffer (TX only, no RX pin).
+    _serial = new(_serialBuf) SerialPIO(dataPin, SerialPIO::NOPIN);
+    _serial->begin(ACCELLINK_BAUD);
+
+    pinMode(_calPin, INPUT);
     attachInterrupt(digitalPinToInterrupt(_calPin), _calISRWrapper, RISING);
 }
 
 // ── Public: send 3-axis packet ────────────────────────────────
 void AccelLinkTX::sendValues(float x, float y, float z) {
+    if (!_serial) return;
+
     // Build 12-byte payload (3 × int32_t little-endian)
     uint8_t payload[12];
     _encodeFloat(x, &payload[0]);
@@ -35,13 +39,14 @@ void AccelLinkTX::sendValues(float x, float y, float z) {
 
     uint8_t crc = _crc8(payload, 12);
 
-    // Transmit: [SYNC1][SYNC2][payload × 12][CRC8]  — 15 bytes total
-    _sendByte(ACCELLINK_SYNC1);
-    _sendByte(ACCELLINK_SYNC2);
-    for (uint8_t i = 0; i < 12; i++) {
-        _sendByte(payload[i]);
-    }
-    _sendByte(crc);
+    // Assemble and transmit: [SYNC1][SYNC2][payload × 12][CRC8] — 15 bytes total
+    uint8_t packet[15];
+    packet[0] = ACCELLINK_SYNC1;
+    packet[1] = ACCELLINK_SYNC2;
+    memcpy(&packet[2], payload, 12);
+    packet[14] = crc;
+
+    _serial->write(packet, 15);
 }
 
 // ── Public: calibration flag ──────────────────────────────────
@@ -54,23 +59,6 @@ bool AccelLinkTX::getCalFlag() {
 // ── Calibration ISR ───────────────────────────────────────────
 void AccelLinkTX::_handleCalISR() {
     _calFlag = true;
-}
-
-// ── Private: send one byte as 8N1 ────────────────────────────
-void AccelLinkTX::_sendByte(uint8_t b) {
-    // Start bit (LOW)
-    digitalWrite(_dataPin, LOW);
-    delayMicroseconds(ACCELLINK_BIT_US);
-
-    // 8 data bits, LSB first
-    for (uint8_t i = 0; i < 8; i++) {
-        digitalWrite(_dataPin, (b >> i) & 1u ? HIGH : LOW);
-        delayMicroseconds(ACCELLINK_BIT_US);
-    }
-
-    // Stop bit (HIGH) – restore idle state
-    digitalWrite(_dataPin, HIGH);
-    delayMicroseconds(ACCELLINK_BIT_US);
 }
 
 // ── Private: encode float → 4 bytes ──────────────────────────
