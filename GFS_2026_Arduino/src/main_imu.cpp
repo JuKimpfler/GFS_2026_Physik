@@ -21,18 +21,27 @@ static float offsetZ = 0.0f;
 static void calibrateIMU() {
     const uint8_t N = 50;
     float sx = 0.0f, sy = 0.0f, sz = 0.0f;
+    uint8_t count = 0;
 
     Serial.println("Kalibrierung... Sensor bitte ruhig halten.");
     for (uint8_t i = 0; i < N; i++) {
-        float x, y, z;
-        while (!IMU.accelerationAvailable());
-        IMU.readAcceleration(x, y, z);
-        sx += x;  sy += y;  sz += z;
+        uint32_t t0 = millis();
+        while (!IMU.accelerationAvailable()) {
+            if (millis() - t0 > 100) break;   // skip sample on timeout
+        }
+        if (IMU.accelerationAvailable()) {
+            float x, y, z;
+            IMU.readAcceleration(x, y, z);
+            sx += x;  sy += y;  sz += z;
+            count++;
+        }
         delay(10);
     }
-    offsetX =  sx / N;
-    offsetY =  sy / N;
-    offsetZ = (sz / N) - 1.0f;   // remove 1 g gravity on Z
+    if (count > 0) {
+        offsetX =  sx / count;
+        offsetY =  sy / count;
+        offsetZ = (sz / count) - 1.0f;   // remove 1 g gravity on Z
+    }
 
     Serial.print("Offsets  X=");  Serial.print(offsetX, 4);
     Serial.print("  Y=");         Serial.print(offsetY, 4);

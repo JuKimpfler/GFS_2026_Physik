@@ -120,6 +120,9 @@ void AccelLinkRX::_handleDataISR() {
 // Called with interrupts already disabled.
 // edgeTime: micros() value at/near the falling edge of the start bit.
 uint8_t AccelLinkRX::_receiveByte(uint8_t pin, uint32_t edgeTime, bool &valid) {
+    // Maximum allowed wait: one full byte period = 10 × BIT_US plus a safety margin.
+    const uint32_t maxWait = (uint32_t)ACCELLINK_BIT_US * 12u;
+
     uint8_t b = 0;
     for (uint8_t bit = 0; bit < 8; bit++) {
         // Sample point: centre of each data bit.
@@ -132,8 +135,11 @@ uint8_t AccelLinkRX::_receiveByte(uint8_t pin, uint32_t edgeTime, bool &valid) {
                             + (uint32_t)ACCELLINK_BIT_US * (uint32_t)bit;   // bit offset
 
         // Busy-wait until the sample point is reached.
-        // micros() has 1 µs resolution; exit as soon as timer ≥ sampleAt.
-        while (micros() < sampleAt);
+        // micros() has 1 µs resolution; a timeout guards against timer wrap-around.
+        uint32_t deadline = edgeTime + maxWait;
+        while (micros() < sampleAt) {
+            if (micros() > deadline) { valid = false; return 0; }
+        }
 
         if (digitalRead(pin)) {
             b |= (1u << bit);
@@ -142,9 +148,12 @@ uint8_t AccelLinkRX::_receiveByte(uint8_t pin, uint32_t edgeTime, bool &valid) {
 
     // Sanity-check: stop bit should be HIGH.  If not, framing error.
     uint32_t stopSample = edgeTime
-                          + (uint32_t)ACCELLINK_BIT_US * 9u  // 1 start + 8 data + ½
+                          + (uint32_t)ACCELLINK_BIT_US * 9u
                           + ((uint32_t)ACCELLINK_BIT_US >> 1u);
-    while (micros() < stopSample);
+    uint32_t deadline = edgeTime + (uint32_t)ACCELLINK_BIT_US * 12u;
+    while (micros() < stopSample) {
+        if (micros() > deadline) { valid = false; return 0; }
+    }
     if (!digitalRead(pin)) {
         valid = false;
     }

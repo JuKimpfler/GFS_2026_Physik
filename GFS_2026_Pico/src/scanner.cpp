@@ -13,7 +13,8 @@
 #define ACCELLINK_CAL_PIN  3
 
 // ── Physical parameter ────────────────────────────────────────
-// Mass of the pendulum / proof-mass in kg.  Adjust to your setup.
+// Mass of the pendulum / proof-mass in kg.  Set to your actual mass.
+// Must be > 0 to avoid division-by-zero in acceleration calculation.
 static float MASS_KG = 0.100f;
 
 // ── HX711 scale factor (raw → Newton).  Calibrate experimentally. ──
