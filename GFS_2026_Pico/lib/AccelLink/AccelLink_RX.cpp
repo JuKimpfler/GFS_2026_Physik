@@ -7,11 +7,10 @@
 
 AccelLinkRX AccelRX;
 
-// ── Singleton pointer for static ISR wrappers ─────────────────
+// ── Singleton pointer for static ISR wrapper ─────────────────
 static AccelLinkRX *_rxInst = nullptr;
 
 static void _dataISRWrapper() { if (_rxInst) _rxInst->_handleDataISR(); }
-static void _calISRWrapper()  { if (_rxInst) _rxInst->_handleCalISR();  }
 
 // ── Initialisation ────────────────────────────────────────────
 void AccelLinkRX::begin(uint8_t dataPin, uint8_t calPin) {
@@ -20,10 +19,10 @@ void AccelLinkRX::begin(uint8_t dataPin, uint8_t calPin) {
     _calPin  = calPin;
 
     pinMode(_dataPin, INPUT);
-    pinMode(_calPin,  INPUT);
+    pinMode(_calPin,  OUTPUT);
+    digitalWrite(_calPin, LOW);     // calibration flag idle LOW
 
     attachInterrupt(digitalPinToInterrupt(_dataPin), _dataISRWrapper, FALLING);
-    attachInterrupt(digitalPinToInterrupt(_calPin),  _calISRWrapper,  RISING);
 }
 
 // ── Public accessors ──────────────────────────────────────────
@@ -44,15 +43,11 @@ float AccelLinkRX::getZ() const {
     return _valZ;
 }
 
-bool AccelLinkRX::getCalFlag() {
-    if (!_calFlag) return false;
-    _calFlag = false;
-    return true;
-}
-
-// ── Calibration ISR ───────────────────────────────────────────
-void AccelLinkRX::_handleCalISR() {
-    _calFlag = true;
+// ── Public: trigger calibration on Arduino ────────────────────
+void AccelLinkRX::triggerCalibration(uint32_t pulseDurationMs) {
+    digitalWrite(_calPin, HIGH);
+    delay(pulseDurationMs);
+    digitalWrite(_calPin, LOW);
 }
 
 // ── Data ISR ─────────────────────────────────────────────────
@@ -92,12 +87,6 @@ void AccelLinkRX::_handleDataISR() {
     }
 
     interrupts();
-
-    // Check calibration pin level in case the RISING edge was missed
-    // during the noInterrupts() window (pulse is >>600 µs so still HIGH).
-    if (digitalRead(_calPin)) {
-        _calFlag = true;
-    }
 
     // ── Validate sync bytes and CRC ──────────────────────────
     if (valid

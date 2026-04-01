@@ -8,14 +8,21 @@
 
 AccelLinkTX AccelTX;
 
+// ── Singleton pointer for static ISR wrapper ──────────────────
+static AccelLinkTX *_txInst = nullptr;
+
+static void _calISRWrapper() { if (_txInst) _txInst->_handleCalISR(); }
+
 // ── Initialisation ────────────────────────────────────────────
 void AccelLinkTX::begin(uint8_t dataPin, uint8_t calPin) {
+    _txInst  = this;
     _dataPin = dataPin;
     _calPin  = calPin;
     pinMode(_dataPin, OUTPUT);
     digitalWrite(_dataPin, HIGH);   // idle HIGH (UART convention)
-    pinMode(_calPin, OUTPUT);
-    digitalWrite(_calPin, LOW);     // calibration flag idle LOW
+    pinMode(_calPin, INPUT);        // calibration flag input from Pico
+
+    attachInterrupt(digitalPinToInterrupt(_calPin), _calISRWrapper, RISING);
 }
 
 // ── Public: send 3-axis packet ────────────────────────────────
@@ -38,10 +45,15 @@ void AccelLinkTX::sendValues(float x, float y, float z) {
 }
 
 // ── Public: calibration flag ──────────────────────────────────
-void AccelLinkTX::triggerCalibration(uint32_t pulseDurationMs) {
-    digitalWrite(_calPin, HIGH);
-    delay(pulseDurationMs);
-    digitalWrite(_calPin, LOW);
+bool AccelLinkTX::getCalFlag() {
+    if (!_calFlag) return false;
+    _calFlag = false;
+    return true;
+}
+
+// ── Calibration ISR ───────────────────────────────────────────
+void AccelLinkTX::_handleCalISR() {
+    _calFlag = true;
 }
 
 // ── Private: send one byte as 8N1 ────────────────────────────

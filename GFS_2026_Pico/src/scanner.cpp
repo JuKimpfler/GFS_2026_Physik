@@ -8,7 +8,7 @@
 
 // ── AccelLink pin configuration ───────────────────────────────
 // GPIO2: data line from Arduino D18
-// GPIO3: calibration flag from Arduino D19
+// GPIO3: calibration flag output → Arduino D19
 #define ACCELLINK_DATA_PIN 2
 #define ACCELLINK_CAL_PIN  3
 
@@ -23,10 +23,13 @@ static float SCALE_FACTOR = 1.0f;
 // ── Objects ───────────────────────────────────────────────────
 HX711 scale;
 
-// ── Helper: re-tare the HX711 (called on calibration flag) ────
-static void retareScale() {
-    Serial.println("Kalibrierungssignal empfangen – Tarierung...");
-    scale.tare(10);
+// ── Helper: trigger calibration on both sensors ───────────────
+// Pulses GPIO3 HIGH (→ Arduino re-calibrates IMU) and
+// simultaneously re-tares the local HX711.
+static void triggerFullCalibration() {
+    Serial.println("Kalibrierung beider Sensoren...");
+    scale.tare(10);                         // re-tare HX711 first
+    AccelRX.triggerCalibration(10);         // then signal Arduino
     Serial.println("Tarierung abgeschlossen.");
 }
 
@@ -38,9 +41,9 @@ void setup() {
     Serial.println("Raspberry Pi Pico – Beschleunigungssensor");
     Serial.println("=========================================");
 
-    // Initialise AccelLink receiver (interrupts on GPIO2 / GPIO3)
+    // Initialise AccelLink receiver (interrupt on GPIO2, cal output on GPIO3)
     AccelRX.begin(ACCELLINK_DATA_PIN, ACCELLINK_CAL_PIN);
-    Serial.println("AccelLink RX bereit (GPIO2=Daten, GPIO3=Cal).");
+    Serial.println("AccelLink RX bereit (GPIO2=Daten, GPIO3=Cal-Out).");
 
     // Initialise HX711
     scale.begin(HX711_DOUT, HX711_SCK);
@@ -56,6 +59,15 @@ void setup() {
         Serial.println("WARNUNG: HX711 nicht bereit!");
     }
 
+    if (MASS_KG <= 0.0f) {
+        Serial.println("WARNUNG: MASS_KG ist 0 oder negativ – Beschleunigung kann nicht berechnet werden!");
+    }
+
+    // Trigger initial calibration: re-tare HX711 and tell Arduino to
+    // calibrate its IMU at the same time.
+    delay(500);
+    triggerFullCalibration();
+
     Serial.println();
     Serial.println("Zeit_s, Kraft_N, Accel_DIY_ms2, Accel_IMU_X, Accel_IMU_Y, Accel_IMU_Z, Diff");
     Serial.println("----------------------------------------------------------------------------");
@@ -67,11 +79,6 @@ void setup() {
 void loop() {
     static uint32_t lastPrint = 0;
     const uint32_t PRINT_INTERVAL_MS = 20;   // match Arduino send rate
-
-    // ── Handle calibration flag ──────────────────────────────
-    if (AccelRX.getCalFlag()) {
-        retareScale();
-    }
 
     uint32_t now = millis();
     if (now - lastPrint < PRINT_INTERVAL_MS) return;

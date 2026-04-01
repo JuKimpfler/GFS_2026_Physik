@@ -16,11 +16,10 @@
 //    interrupt re-armed immediately for the next attempt.
 //
 //  Wire 2 (calPin = GPIO3):
-//    Calibration flag input, idle LOW.
-//    A RISING edge (HIGH pulse from Arduino) sets a flag that
-//    the main loop can read with getCalFlag().
-//    The pin level is also checked after every received packet
-//    in case the edge occurred during the noInterrupts() window.
+//    Calibration flag output, idle LOW.
+//    Call triggerCalibration() to pulse the pin HIGH for a
+//    configurable duration.  The Arduino detects the RISING edge
+//    and re-calibrates its IMU.
 // ============================================================
 
 #include <Arduino.h>
@@ -40,7 +39,7 @@ class AccelLinkRX {
 public:
     // Attach interrupts and configure pins.
     // dataPin: bit-bang UART RX (default GPIO2)
-    // calPin:  calibration flag input (default GPIO3)
+    // calPin:  calibration flag output (default GPIO3)
     void begin(uint8_t dataPin = 2, uint8_t calPin = 3);
 
     // Returns true when a new, CRC-validated packet has been received.
@@ -52,12 +51,13 @@ public:
     float getY() const;
     float getZ() const;
 
-    // Returns true (and clears the flag) if a calibration pulse was received.
-    bool getCalFlag();
+    // Pulse the calibration flag pin HIGH for pulseDurationMs milliseconds,
+    // then return it to LOW.  The Arduino will detect the RISING edge and
+    // re-calibrate its IMU.
+    void triggerCalibration(uint32_t pulseDurationMs = 10);
 
-    // ── ISR handlers – do not call directly ─────────────────
+    // ── ISR handler – do not call directly ──────────────────
     void _handleDataISR();
-    void _handleCalISR();
 
 private:
     uint8_t _dataPin = 2;
@@ -67,7 +67,6 @@ private:
     volatile float _valY    = 0.0f;
     volatile float _valZ    = 0.0f;
     volatile bool  _newData = false;
-    volatile bool  _calFlag = false;
 
     // Receive one byte: waits for falling edge (start bit) then samples 8 bits.
     // edgeTime: µs timestamp of the falling edge (from micros()).

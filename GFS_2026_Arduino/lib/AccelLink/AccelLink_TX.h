@@ -15,8 +15,10 @@
 //    Timing: 15 bytes × 10 bits × 4 µs = 600 µs << 4 ms limit.
 //
 //  Wire 2 (calPin = D19):
-//    Calibration flag output, idle LOW.
-//    HIGH pulse (default 10 ms) signals the Pico to re-tare its HX711.
+//    Calibration flag input, idle LOW.
+//    A RISING edge (HIGH pulse from the Pico) sets an internal flag.
+//    Call getCalFlag() in loop() – returns true once and auto-clears.
+//    The Arduino should then re-calibrate its IMU.
 // ============================================================
 
 #include <Arduino.h>
@@ -34,20 +36,25 @@ class AccelLinkTX {
 public:
     // Initialize the two pins.
     // dataPin: bit-bang UART TX (default D18)
-    // calPin:  calibration flag output (default D19)
+    // calPin:  calibration flag input (default D19)
     void begin(uint8_t dataPin = 18, uint8_t calPin = 19);
 
     // Transmit X, Y, Z acceleration values clamped to [-100.0, +100.0].
     // Blocks for ~600 µs while transmitting the 15-byte packet.
     void sendValues(float x, float y, float z);
 
-    // Pulse the calibration flag pin HIGH for pulseDurationMs milliseconds,
-    // then return it to LOW.  The Pico should re-tare / calibrate upon receipt.
-    void triggerCalibration(uint32_t pulseDurationMs = 10);
+    // Returns true (and clears the flag) when the Pico has sent a
+    // calibration pulse on the calPin.  Poll this in loop().
+    bool getCalFlag();
+
+    // ── ISR handler – do not call directly ──────────────────
+    void _handleCalISR();
 
 private:
     uint8_t _dataPin = 18;
     uint8_t _calPin  = 19;
+
+    volatile bool _calFlag = false;
 
     // Transmit one byte as 8N1 (start bit + 8 data bits LSB-first + stop bit).
     void _sendByte(uint8_t b);

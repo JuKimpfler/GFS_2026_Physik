@@ -4,7 +4,7 @@
 
 // ── Pin configuration ─────────────────────────────────────────
 // D18: bit-bang UART data line → Pico GPIO2
-// D19: calibration flag output → Pico GPIO3
+// D19: calibration flag input ← Pico GPIO3
 #define ACCELLINK_DATA_PIN 18
 #define ACCELLINK_CAL_PIN  19
 
@@ -16,8 +16,10 @@ static float offsetX = 0.0f;
 static float offsetY = 0.0f;
 static float offsetZ = 0.0f;
 
+static const uint32_t IMU_SAMPLE_TIMEOUT_MS = 100;
+
 // Average the IMU over N samples to find the resting offset.
-// Afterwards pulses the calibration flag so the Pico re-tares its HX711.
+// Assumes the Z-axis is aligned vertically (reads +1 g at rest).
 static void calibrateIMU() {
     const uint8_t N = 50;
     float sx = 0.0f, sy = 0.0f, sz = 0.0f;
@@ -27,7 +29,7 @@ static void calibrateIMU() {
     for (uint8_t i = 0; i < N; i++) {
         uint32_t t0 = millis();
         while (!IMU.accelerationAvailable()) {
-            if (millis() - t0 > 100) break;   // skip sample on timeout
+            if (millis() - t0 > IMU_SAMPLE_TIMEOUT_MS) break;
         }
         if (IMU.accelerationAvailable()) {
             float x, y, z;
@@ -40,15 +42,12 @@ static void calibrateIMU() {
     if (count > 0) {
         offsetX =  sx / count;
         offsetY =  sy / count;
-        offsetZ = (sz / count) - 1.0f;   // remove 1 g gravity on Z
+        offsetZ = (sz / count) - 1.0f;   // remove 1 g gravity (Z must point up)
     }
 
     Serial.print("Offsets  X=");  Serial.print(offsetX, 4);
     Serial.print("  Y=");         Serial.print(offsetY, 4);
     Serial.print("  Z=");         Serial.println(offsetZ, 4);
-
-    // Signal Pico to re-tare its HX711 at the same moment
-    AccelTX.triggerCalibration(10);
 }
 
 // ── Arduino setup ─────────────────────────────────────────────
@@ -84,6 +83,14 @@ void setup() {
 void loop() {
     static uint32_t lastSend = 0;
     uint32_t now = millis();
+
+    // ── Check calibration flag from Pico ─────────────────────
+    // The Pico pulses GPIO3 HIGH to request an IMU re-calibration.
+    if (AccelTX.getCalFlag()) {
+        Serial.println("Kalibrierungssignal vom Pico empfangen.");
+        calibrateIMU();
+        Serial.println("Bereit – sende weiter.");
+    }
 
     if (now - lastSend >= SEND_INTERVAL_MS) {
         lastSend = now;
