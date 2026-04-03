@@ -2,46 +2,87 @@
 #include "HX711.h"
 #include "BotConnect.h"
 
+unsigned long startZeit;
+unsigned int dauer;
+int bits[12]; 
+int vorzeichen = 0;
+uint16_t value;
+
+int _pin = 2;
+
+float    _value;
+bool     _valid;
+int _count = 0;
+int _lastcount = 0;
+
+void receive() {
+    _valid = false;
+    _count = _count+1;
+        
+    startZeit = micros();
+
+    while(digitalRead(_pin) == HIGH) {
+        if(micros() - startZeit > 200) return; // Timeout, falls Signal zu lang
+    }
+    
+    dauer = micros() - startZeit;
+
+    if(dauer >= 140 && dauer <= 160) {
+
+        delayMicroseconds(50);
+
+        for(int i = 0; i < 13; i++) {
+            delayMicroseconds(50);
+            bits[i] = digitalRead(_pin);
+            delayMicroseconds(50);
+        }
+        _valid = true;
+    }
+
+    value = 0;
+
+    for (int i = 0; i < 12; i++) {
+        if (bits[i] == 1) {
+            value |= (1 << i);
+        }
+    }
+    
+    _value = value / 1000.0;
+
+    if(vorzeichen = 1){
+        _value = _value*-1;
+    }
+}
+
+float getValue() { return _value; }
+bool  isValid() { return _valid; }
+bool  isNew() { 
+    if(_count != _lastcount) { return true; }
+    else{ return false; }
+    _lastcount = _count;
+}
+
 // ── HX711 pin configuration (unchanged from original) ─────────
 #define HX711_DOUT  4
 #define HX711_SCK   5
-
-#define ACCELLINK_CAL_PIN  3
-
-#include "SimpleLink.h"
-
-const uint8_t RX_PIN = 2;
-
-SimpleLinkReceiver link(RX_PIN);
-
-
-// ── Physical parameter ────────────────────────────────────────
-// Mass of the pendulum / proof-mass in kg.  Set to your actual mass.
-// Must be > 0 to avoid division-by-zero in acceleration calculation.
 static float MASS_KG = 0.100f;
-
-// ── HX711 scale factor (raw → Newton).  Calibrate experimentally. ──
 static float SCALE_FACTOR = 1.0f;
-
-// ── Objects ───────────────────────────────────────────────────
 HX711 scale;
 
-// ── Helper: trigger calibration on both sensors ───────────────
-// Pulses GPIO3 HIGH (→ Arduino re-calibrates IMU) and
-// simultaneously re-tares the local HX711.
 static void triggerFullCalibration() {
     Serial.println("Kalibrierung beider Sensoren...");
     scale.tare(10);                         // re-tare HX711 first
     Serial.println("Tarierung abgeschlossen.");
 }
 
-// ── Arduino setup ─────────────────────────────────────────────
 void setup() {
     Serial.begin(115200);
     Serial1.begin(115200);
-    link.begin();
 
     BC.begin(Serial1);
+
+    pinMode(_pin, INPUT_PULLUP);
+    attachInterrupt(digitalPinToInterrupt(_pin), receive, RISING);
 
     delay(10000);
 
@@ -72,10 +113,6 @@ void setup() {
     delay(500);
     triggerFullCalibration();
 
-    Serial.println();
-    Serial.println("Zeit_s, Kraft_N, Accel_DIY_ms2, Accel_IMU_X, Accel_IMU_Y, Accel_IMU_Z, Diff");
-    Serial.println("----------------------------------------------------------------------------");
-
     pinMode(LED_BUILTIN, OUTPUT);
 }
 
@@ -91,8 +128,8 @@ void loop() {
     }
 
     float imu_y = 0;
-    if (link.receive()) {
-        imu_y = link.getValue();
+    if(isNew()){
+        imu_y = getValue();
         digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
     }
 

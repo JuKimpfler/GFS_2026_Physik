@@ -1,27 +1,26 @@
 #include <Arduino.h>
 #include <Arduino_LSM6DSOX.h>
-#include "AccelLink_TX.h"
+#include "SimpleLink.h"
 
-// ── Pin configuration ─────────────────────────────────────────
-// D18: bit-bang UART data line → Pico GPIO2
-// D19: calibration flag input ← Pico GPIO3
-#define ACCELLINK_DATA_PIN 18
-#define ACCELLINK_CAL_PIN  19
 
-// Send IMU data every 20 ms (50 Hz)
-#define SEND_INTERVAL_MS 20
 
-// ── Calibration offsets ───────────────────────────────────────
-static float offsetX = 0.0f;
-static float offsetY = 0.0f;
-static float offsetZ = 0.0f;
+#define FILTER_SIZE 5
+float filtered_y[FILTER_SIZE] = {0};
+int filter_index = 0;
+float filtered_accel_y;
 
-static const uint32_t IMU_SAMPLE_TIMEOUT_MS = 100;
+float offsetX = 0.0f;
+float offsetY = 0.0f;
+float offsetZ = 0.0f;
+
+uint32_t IMU_SAMPLE_TIMEOUT_MS = 100;
+
+SimpleLinkSender link(15);
 
 // Average the IMU over N samples to find the resting offset.
 // Assumes the Z-axis is aligned vertically (reads +1 g at rest).
-static void calibrateIMU() {
-    const uint8_t N = 50;
+void calibrateIMU() {
+    uint8_t N = 50;
     float sx = 0.0f, sy = 0.0f, sz = 0.0f;
     uint8_t count = 0;
 
@@ -42,86 +41,52 @@ static void calibrateIMU() {
     if (count > 0) {
         offsetX =  sx / count;
         offsetY =  sy / count;
-        offsetZ = (sz / count) - 1.0f;   // remove 1 g gravity (Z must point up)
+        offsetZ = (sz / count) - 1.0f;
     }
-
-    Serial.print("Offsets  X=");  Serial.print(offsetX, 4);
-    Serial.print("  Y=");         Serial.print(offsetY, 4);
-    Serial.print("  Z=");         Serial.println(offsetZ, 4);
 }
 
-// ── Arduino setup ─────────────────────────────────────────────
+float apply_filter(float new_value, float* filter_array) {
+  // Füge neuen Wert hinzu
+  filter_array[filter_index] = new_value;
+  
+  // Berechne Durchschnitt
+  float sum = 0;
+  for (int i = 0; i < FILTER_SIZE; i++) {
+    sum += filter_array[i];
+  }
+  
+  return sum / FILTER_SIZE;
+}
+
 void setup() {
     Serial.begin(115200);
-    
-    delay(10000);
 
-    // Initialise the AccelLink transmitter
-    AccelTX.begin(ACCELLINK_DATA_PIN, ACCELLINK_CAL_PIN);
-    if (!AccelTX.isReady()) {
-        Serial.println("FEHLER: AccelLink TX (SerialPIO) konnte nicht initialisiert werden!");
-        while (true) {
-            digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
-            delay(200);
-        }
-    }
+    IMU.begin();
 
-    // Initialise the IMU
-    if (!IMU.begin()) {
-        Serial.println("FEHLER: LSM6DSOX konnte nicht initialisiert werden!");
-        while (true) {
-            digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
-            delay(200);
-        }
-    }
-
-    Serial.println("IMU bereit.");
-    Serial.print("Abtastrate: ");
-    Serial.print(IMU.accelerationSampleRate());
-    Serial.println(" Hz");
     pinMode(LED_BUILTIN, OUTPUT);
+    pinMode(14,INPUT_PULLDOWN);
+    pinMode(15,OUTPUT);
 
     // Perform initial calibration
-    delay(500);
-    calibrateIMU();
+    delay(1000);
+    while(!IMU.accelerationAvailable());
+    IMU.readAcceleration(offsetX, offsetY, offsetZ);
     Serial.println("Bereit – sende Beschleunigungsdaten.");
 }
 
-// ── Arduino main loop ─────────────────────────────────────────
+uint32_t lastSend  = 0;
+
 void loop() {
-    static uint32_t lastSend = 0;
-    uint32_t now = millis();
 
-    // ── Check calibration flag from Pico ─────────────────────
-    // The Pico pulses GPIO3 HIGH to request an IMU re-calibration.
-    if (AccelTX.getCalFlag()) {
-        Serial.println("Kalibrierungssignal vom Pico empfangen.");
-        calibrateIMU();
-        Serial.println("Bereit – sende weiter.");
-    }
+    //if(digitalRead(14)){
+    //    calibrateIMU();
+    //}
 
-    if (now - lastSend >= SEND_INTERVAL_MS) {
-        lastSend = now;
-
-        if (IMU.accelerationAvailable()) {
-            float rx, ry, rz;
-            IMU.readAcceleration(rx, ry, rz);
-
-            // Remove resting offsets
-            float ax = (rx - offsetX) * 9.81f;   // convert g → m/s²
-            float ay = (ry - offsetY) * 9.81f;
-            float az = (rz - offsetZ) * 9.81f;
-
-            // Transmit via AccelLink (~600 µs)
-            AccelTX.sendValues(ax, ay, az);
-
-            // LED heartbeat
-            digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
-
-            // USB-serial debug output
-            Serial.print("ax="); Serial.print(ax, 4);
-            Serial.print(" ay="); Serial.print(ay, 4);
-            Serial.print(" az="); Serial.println(az, 4);
-        }
+    if (IMU.accelerationAvailable()) {
+        float rx, ry, rz;
+        IMU.readAcceleration(rx, ry, rz);
+        filtered_accel_y = apply_filter(((ry - offsetY)*-10), filtered_y);
+        filter_index = (filter_index + 1) % FILTER_SIZE;
+        link.send(filtered_accel_y/2);
     }
 }
