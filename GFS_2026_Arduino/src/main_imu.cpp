@@ -74,8 +74,7 @@ void loop() {
     if (IMU.accelerationAvailable()) {
         float fx, fy, fz;
         IMU.readAcceleration(fx, fy, fz);
-        double ry = fy;
-        filteredAccelY = applyFilter(((ry - offsetY) * -10), filteredY);
+        filteredAccelY = applyFilter(((static_cast<double>(fy) - offsetY) * -10), filteredY);
         filterIndex    = (filterIndex + 1) % FILTER_SIZE;
         link.send(filteredAccelY / 2);
         }

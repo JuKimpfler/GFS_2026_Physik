@@ -25,7 +25,7 @@ unsigned long timestamp   = 0;
 int16_t bitCounter        = 0;
 int16_t bits[13];
 bool dataReady            = false;
-int16_t factor            = 300;
+long factor               = 300;
 
 double filteredY[FILTER_SIZE] = {0};
 int16_t filterIndex           = 0;
