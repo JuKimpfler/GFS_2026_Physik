@@ -6,14 +6,15 @@
 #define HX711_SCK  3
 #define FILTER_SIZE 5
 
-static double scaleFactor = 1.0;
+static double scaleFactor = 220;
 HX711 scale;
 
 double forceN        = 0;
+double force_kiloN   = 0;
 double accelDiy      = 0;
 int16_t count        = 0;
 int16_t count2       = 0;
-long lastSend        = 0;
+int last             = 0;
 
 const int16_t RX_PIN = 9;
 
@@ -36,9 +37,9 @@ double applyFilter(double newValue, double* filterArray) {
     double sum = 0;
     for (int16_t i = 0; i < FILTER_SIZE; i++) {
         sum += filterArray[i];
-        }
-    return sum / FILTER_SIZE;
     }
+    return sum / FILTER_SIZE;
+}
 
 void updateReceiver() {
     bool pinState        = digitalRead(RX_PIN);
@@ -58,11 +59,11 @@ void updateReceiver() {
                 if (duration >= (unsigned long)(13 * factor) && duration <= (unsigned long)(17 * factor)) {
                     timestamp = now;
                     state = WAIT_PAUSE;
-                    }
+                }
                 else {
                     state = RESET_WAIT;
-                    }
                 }
+            }
             break;
 
         case WAIT_PAUSE:
@@ -70,7 +71,7 @@ void updateReceiver() {
                 timestamp  = now;
                 bitCounter = 0;
                 state      = READ_BIT;
-                }
+            }
             break;
 
         case READ_BIT: {
@@ -86,12 +87,12 @@ void updateReceiver() {
                     dataReady = true;
                     state     = RESET_WAIT;
                     timestamp = micros();
-                    }
                 }
-            break;
             }
+            break;
         }
     }
+}
 
 void startMeasurement() {
     if (state == IDLE) {
@@ -100,12 +101,12 @@ void startMeasurement() {
         state     = START_MEASUREMENT;
         count     = count + 1;
         count2    = count2 + 1;
-        }
     }
+}
 
 static void calibrate() {
-    scale.tare(10);
-    }
+    scale.tare(20);
+}
 
 void setup() {
     Serial.begin(115200);
@@ -113,7 +114,6 @@ void setup() {
 
     pinMode(LED_BUILTIN, OUTPUT);
     pinMode(RX_PIN, INPUT_PULLUP);
-    pinMode(8, OUTPUT);
     attachInterrupt(digitalPinToInterrupt(RX_PIN), startMeasurement, RISING);
 
     BC.begin(Serial1);
@@ -133,27 +133,26 @@ void setup() {
     delay(500);
 
     calibrate();
-    }
+}
 
 void loop() {
     if (state == IDLE || state == RESET_WAIT) {
         interrupts();
-        }
+    }
     else {
         noInterrupts();
-        }
+    }
 
     if (state != IDLE) {
         noInterrupts();
         updateReceiver();
-        }
+    }
     else {
-        BC.process();
-
         if (scale.is_ready()) {
-            forceN   = scale.get_units(1) * -1;
-            accelDiy = forceN / 10000;
-            }
+            force_kiloN = scale.get_units(1);
+            forceN = force_kiloN/1000;
+            accelDiy = forceN/0.540; // Masse des Messgewichts: 540g
+        }
 
         if (dataReady == true) {
             count--;
@@ -163,25 +162,23 @@ void loop() {
                     intValue |= (1 << i);
                     }
                 }
-            value = (intValue / 1000.0) * 2;
+            value = intValue;
             if (bits[0] == 1) {
                 value = value * -1;
                 }
             dataReady = false;
-            }
+            value = value/1000;
+        }
 
         if (digitalRead(15)) {
             calibrate();
-            }
+        }
 
-        if (millis() - lastSend >= 30) {
+        if(millis()-last>40){
+            last = millis();
             filteredAccelY = applyFilter(accelDiy, filteredY);
             filterIndex    = (filterIndex + 1) % FILTER_SIZE;
-
-            double t = millis() / 1000.0;
-
-            BC.sendP2P(String(t) + "\t" + String(filteredAccelY) + "\t" + String(value) + "\r\n");
-            Serial.print(String(t) + "\t" + String(filteredAccelY) + "\t" + String(value) + "\r\n");
-            }
+            BC.sendP2P(String(millis()) + " " + String(filteredAccelY) + " " + String(value) + "\n");
         }
     }
+}

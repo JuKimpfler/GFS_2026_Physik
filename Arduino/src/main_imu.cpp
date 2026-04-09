@@ -26,38 +26,35 @@ void calibrateIMU() {
         long startTime = millis();
         while (!IMU.accelerationAvailable()) {
             if (millis() - startTime > imuSampleTimeoutMs) break;
-            }
+        }
         if (IMU.accelerationAvailable()) {
             float fx, fy, fz;
             IMU.readAcceleration(fx, fy, fz);
             sumX += fx; sumY += fy; sumZ += fz;
             count++;
-            }
-        delay(10);
         }
+        delay(10);
+    }
     if (count > 0) {
         offsetX =  sumX / count;
         offsetY =  sumY / count;
         offsetZ = (sumZ / count) - 1.0;
-        }
     }
+}
 
 double applyFilter(double newValue, double* filterArray) {
     filterArray[filterIndex] = newValue;
     double sum = 0;
     for (int16_t i = 0; i < FILTER_SIZE; i++) {
         sum += filterArray[i];
-        }
-    return sum / FILTER_SIZE;
     }
+    return sum / FILTER_SIZE;
+}
 
 void setup() {
-    Serial.begin(115200);
-
     IMU.begin();
 
     pinMode(LED_BUILTIN, OUTPUT);
-    pinMode(14, INPUT_PULLDOWN);
     pinMode(15, OUTPUT);
 
     delay(1000);
@@ -67,15 +64,14 @@ void setup() {
     offsetX = fx;
     offsetY = fy;
     offsetZ = fz;
-    Serial.println("Ready - sending acceleration data.");
-    }
+}
 
 void loop() {
     if (IMU.accelerationAvailable()) {
         float fx, fy, fz;
         IMU.readAcceleration(fx, fy, fz);
-        filteredAccelY = applyFilter(((static_cast<double>(fy) - offsetY) * -10), filteredY);
+        filteredAccelY = applyFilter(((static_cast<double>(fy) - offsetY)), filteredY);
         filterIndex    = (filterIndex + 1) % FILTER_SIZE;
-        link.send(filteredAccelY / 2);
-        }
+        link.send(filteredAccelY);
     }
+}

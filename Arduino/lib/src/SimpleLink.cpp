@@ -33,7 +33,7 @@ bool SimpleLinkSender::send(float value) {
 
     int bits[12] = {0,0,0,0,0,0,0,0,0,0,0,0};     
 
-    uint16_t wert = (uint16_t)(value_round * 1000.0 + 0.5);
+    uint16_t wert = (uint16_t)((value_round * 1000.0)+0.5);
 
     for (int i = 0; i < 12; i++) {
         bits[i] = (wert >> i) & 0x01;
