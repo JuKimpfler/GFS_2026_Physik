@@ -2,61 +2,54 @@
 #include <Arduino_LSM6DSOX.h>
 #include "SimpleLink.h"
 
-
-
 #define FILTER_SIZE 5
-float filtered_y[FILTER_SIZE] = {0};
-int filter_index = 0;
-float filtered_accel_y;
 
-float offsetX = 0.0f;
-float offsetY = 0.0f;
-float offsetZ = 0.0f;
+double filteredY[FILTER_SIZE] = {0};
+int16_t filterIndex   = 0;
+double filteredAccelY = 0;
 
-uint32_t IMU_SAMPLE_TIMEOUT_MS = 100;
+double offsetX = 0.0;
+double offsetY = 0.0;
+double offsetZ = 0.0;
+
+long imuSampleTimeoutMs = 100;
+long lastSend           = 0;
 
 SimpleLinkSender link(15);
 
-// Average the IMU over N samples to find the resting offset.
-// Assumes the Z-axis is aligned vertically (reads +1 g at rest).
 void calibrateIMU() {
-    uint8_t N = 50;
-    float sx = 0.0f, sy = 0.0f, sz = 0.0f;
-    uint8_t count = 0;
+    uint16_t sampleCount = 50;
+    double sumX = 0.0, sumY = 0.0, sumZ = 0.0;
+    uint16_t count = 0;
 
-    Serial.println("Kalibrierung... Sensor bitte ruhig halten.");
-    for (uint8_t i = 0; i < N; i++) {
-        uint32_t t0 = millis();
+    for (uint16_t i = 0; i < sampleCount; i++) {
+        long startTime = millis();
         while (!IMU.accelerationAvailable()) {
-            if (millis() - t0 > IMU_SAMPLE_TIMEOUT_MS) break;
-        }
+            if (millis() - startTime > imuSampleTimeoutMs) break;
+            }
         if (IMU.accelerationAvailable()) {
-            float x, y, z;
-            IMU.readAcceleration(x, y, z);
-            sx += x;  sy += y;  sz += z;
+            float fx, fy, fz;
+            IMU.readAcceleration(fx, fy, fz);
+            sumX += fx; sumY += fy; sumZ += fz;
             count++;
-        }
+            }
         delay(10);
-    }
+        }
     if (count > 0) {
-        offsetX =  sx / count;
-        offsetY =  sy / count;
-        offsetZ = (sz / count) - 1.0f;
+        offsetX =  sumX / count;
+        offsetY =  sumY / count;
+        offsetZ = (sumZ / count) - 1.0;
+        }
     }
-}
 
-float apply_filter(float new_value, float* filter_array) {
-  // Füge neuen Wert hinzu
-  filter_array[filter_index] = new_value;
-  
-  // Berechne Durchschnitt
-  float sum = 0;
-  for (int i = 0; i < FILTER_SIZE; i++) {
-    sum += filter_array[i];
-  }
-  
-  return sum / FILTER_SIZE;
-}
+double applyFilter(double newValue, double* filterArray) {
+    filterArray[filterIndex] = newValue;
+    double sum = 0;
+    for (int16_t i = 0; i < FILTER_SIZE; i++) {
+        sum += filterArray[i];
+        }
+    return sum / FILTER_SIZE;
+    }
 
 void setup() {
     Serial.begin(115200);
@@ -64,29 +57,25 @@ void setup() {
     IMU.begin();
 
     pinMode(LED_BUILTIN, OUTPUT);
-    pinMode(14,INPUT_PULLDOWN);
-    pinMode(15,OUTPUT);
+    pinMode(14, INPUT_PULLDOWN);
+    pinMode(15, OUTPUT);
 
-    // Perform initial calibration
     delay(1000);
-    while(!IMU.accelerationAvailable());
-    IMU.readAcceleration(offsetX, offsetY, offsetZ);
-    Serial.println("Bereit – sende Beschleunigungsdaten.");
-}
-
-uint32_t lastSend  = 0;
+    while (!IMU.accelerationAvailable());
+    float fx, fy, fz;
+    IMU.readAcceleration(fx, fy, fz);
+    offsetX = fx;
+    offsetY = fy;
+    offsetZ = fz;
+    Serial.println("Ready - sending acceleration data.");
+    }
 
 void loop() {
-
-    //if(digitalRead(14)){
-    //    calibrateIMU();
-    //}
-
     if (IMU.accelerationAvailable()) {
-        float rx, ry, rz;
-        IMU.readAcceleration(rx, ry, rz);
-        filtered_accel_y = apply_filter(((ry - offsetY)*-10), filtered_y);
-        filter_index = (filter_index + 1) % FILTER_SIZE;
-        link.send(filtered_accel_y/2);
+        float fx, fy, fz;
+        IMU.readAcceleration(fx, fy, fz);
+        filteredAccelY = applyFilter(((static_cast<double>(fy) - offsetY) * -10), filteredY);
+        filterIndex    = (filterIndex + 1) % FILTER_SIZE;
+        link.send(filteredAccelY / 2);
+        }
     }
-}

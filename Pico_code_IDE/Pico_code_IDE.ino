@@ -2,111 +2,119 @@
 #include "HX711.h"
 #include "BotConnect.h"
 
-// ── HX711 pin configuration (unchanged from original) ─────────
-#define HX711_DOUT  2
-#define HX711_SCK   3
-static float SCALE_FACTOR = 1.0f;
+#define HX711_DOUT 2
+#define HX711_SCK  3
+#define FILTER_SIZE 5
+
+static double scaleFactor = 1.0;
 HX711 scale;
 
-float force_N   = 0;
-float accel_diy = 0;
+double forceN        = 0;
+double accelDiy      = 0;
+int16_t count        = 0;
+int16_t count2       = 0;
+long lastSend        = 0;
 
-int count = 0;
-int count2 = 0;
+const int16_t RX_PIN = 9;
 
-long lastSend = 0;
+enum ReceiverState { RESET_WAIT, IDLE, START_MEASUREMENT, WAIT_PAUSE, READ_BIT };
+ReceiverState state = RESET_WAIT;
 
-const int rxPin = 9;
-enum EmpfangsStatus { RESET_WAIT, IDLE, START_MESSUNG, PAUSE_WARTEN, BIT_LESEN };
-EmpfangsStatus status = RESET_WAIT;
-float value=0;
-unsigned long zeitStempel = 0;
-int bitZahler = 0;
-int bits[13];
-bool datenBereit = false;
+double value              = 0;
+unsigned long timestamp   = 0;
+int16_t bitCounter        = 0;
+int16_t bits[13];
+bool dataReady            = false;
+long factor               = 300;
 
-int Faktor = 300;
+double filteredY[FILTER_SIZE] = {0};
+int16_t filterIndex           = 0;
+double filteredAccelY         = 0;
 
-void updateReceiver1() {
-  bool pinState = digitalRead(rxPin);
-  unsigned long jetzt = micros();
-
-  switch (status) {
-    case RESET_WAIT:
-        status = IDLE;
-        break;
-
-    case IDLE:
-      break;
-
-    case START_MESSUNG:
-      // Wir warten auf die fallende Flanke des 150µs Impulses
-      if (pinState == LOW) {
-        unsigned long dauer = jetzt - zeitStempel;
-        if (dauer >= 13*Faktor && dauer <= 17*Faktor) {
-          zeitStempel = jetzt; // Start der 50µs Pause (LOW-Phase)
-          status = PAUSE_WARTEN;
-        } else {
-          status = RESET_WAIT;
+double applyFilter(double newValue, double* filterArray) {
+    filterArray[filterIndex] = newValue;
+    double sum = 0;
+    for (int16_t i = 0; i < FILTER_SIZE; i++) {
+        sum += filterArray[i];
         }
-      }
-      break;
-
-    case PAUSE_WARTEN:
-      // Warte das Ende der 50µs LOW-Phase ab
-      if (jetzt - zeitStempel >= 10*Faktor) {
-        zeitStempel = jetzt;
-        bitZahler = 0;
-        status = BIT_LESEN;
-      }
-      break;
-
-    case BIT_LESEN:
-      // Das erste Bit nach 50µs lesen (Mitte), alle weiteren nach 100µs
-      unsigned long intervall = (bitZahler == 0) ? 5*Faktor : 10*Faktor;
-
-      if (jetzt - zeitStempel >= intervall) {
-        bits[bitZahler] = digitalRead(rxPin);
-        bitZahler++;
-        
-        zeitStempel += intervall;
-
-        if (bitZahler >= 13) {
-          digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
-          datenBereit = true;
-          status = RESET_WAIT;
-          zeitStempel = micros(); 
-        }
-      }
-      break;
-  }
-}
-
-void start1(){
-    if(status==1){
-        unsigned long jetzt = micros();
-        zeitStempel = jetzt;
-        status = START_MESSUNG;
-        count = count+1;
-        count2 = count2+1;
+    return sum / FILTER_SIZE;
     }
-}
 
-static void Calibration() {
-    scale.tare(10); 
-    //digitalWrite(8,HIGH);
-    //delay(1000);
-    //digitalWrite(8,LOW);        
-}
+void updateReceiver() {
+    bool pinState        = digitalRead(RX_PIN);
+    unsigned long now    = micros();
+
+    switch (state) {
+        case RESET_WAIT:
+            state = IDLE;
+            break;
+
+        case IDLE:
+            break;
+
+        case START_MEASUREMENT:
+            if (pinState == LOW) {
+                unsigned long duration = now - timestamp;
+                if (duration >= (unsigned long)(13 * factor) && duration <= (unsigned long)(17 * factor)) {
+                    timestamp = now;
+                    state = WAIT_PAUSE;
+                    }
+                else {
+                    state = RESET_WAIT;
+                    }
+                }
+            break;
+
+        case WAIT_PAUSE:
+            if (now - timestamp >= (unsigned long)(10 * factor)) {
+                timestamp  = now;
+                bitCounter = 0;
+                state      = READ_BIT;
+                }
+            break;
+
+        case READ_BIT: {
+            unsigned long interval = (bitCounter == 0)
+                ? (unsigned long)(5 * factor)
+                : (unsigned long)(10 * factor);
+            if (now - timestamp >= interval) {
+                bits[bitCounter] = digitalRead(RX_PIN);
+                bitCounter++;
+                timestamp += interval;
+                if (bitCounter >= 13) {
+                    digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
+                    dataReady = true;
+                    state     = RESET_WAIT;
+                    timestamp = micros();
+                    }
+                }
+            break;
+            }
+        }
+    }
+
+void startMeasurement() {
+    if (state == IDLE) {
+        unsigned long now = micros();
+        timestamp = now;
+        state     = START_MEASUREMENT;
+        count     = count + 1;
+        count2    = count2 + 1;
+        }
+    }
+
+static void calibrate() {
+    scale.tare(10);
+    }
 
 void setup() {
     Serial.begin(115200);
     Serial1.begin(115200);
 
     pinMode(LED_BUILTIN, OUTPUT);
-    pinMode(rxPin,INPUT_PULLUP);
-    pinMode(8,OUTPUT);
-    attachInterrupt(digitalPinToInterrupt(rxPin), start1, RISING);
+    pinMode(RX_PIN, INPUT_PULLUP);
+    pinMode(8, OUTPUT);
+    attachInterrupt(digitalPinToInterrupt(RX_PIN), startMeasurement, RISING);
 
     BC.begin(Serial1);
 
@@ -116,80 +124,64 @@ void setup() {
 
     delay(500);
 
-    while(!scale.is_ready());
-    Serial.println("HX711 gefunden.");
+    while (!scale.is_ready());
+    Serial.println("HX711 ready.");
     scale.tare(20);
-    scale.set_scale(SCALE_FACTOR);
-    Serial.println("Calibriert abgeschlossen.");
+    scale.set_scale(scaleFactor);
+    Serial.println("Calibration done.");
 
     delay(500);
 
-    Calibration();
-}
-
-#define FILTER_SIZE 5
-float filtered_y[FILTER_SIZE] = {0};
-int filter_index = 0;
-float filtered_accel_y;
-
-float apply_filter(float new_value, float* filter_array) {
-  // Füge neuen Wert hinzu
-  filter_array[filter_index] = new_value;
-
-  float sum = 0;
-  for (int i = 0; i < FILTER_SIZE; i++) {
-    sum += filter_array[i];
-  }
-  
-  return sum / FILTER_SIZE;
-}
-
-// ── Arduino main loop ─────────────────────────────────────────
-void loop() {
-    if (status == 1 || status == 0){interrupts();}
-    else{noInterrupts();}
-
-    if (status != 1 ){
-        noInterrupts();
-        updateReceiver1();
+    calibrate();
     }
-    else{
-      BC.process();
 
-      if (scale.is_ready()) {
+void loop() {
+    if (state == IDLE || state == RESET_WAIT) {
+        interrupts();
+        }
+    else {
+        noInterrupts();
+        }
 
-          force_N   = scale.get_units(1)*-1;
-          accel_diy = force_N/10000;
-      }
+    if (state != IDLE) {
+        noInterrupts();
+        updateReceiver();
+        }
+    else {
+        BC.process();
 
-      if (datenBereit==true) {
-          count = count-1;
-          uint16_t Ganzzahl = 0;
-          for (int i = 0; i < 12; i++) {
-              if (bits[i+1] == 1) {
-                  Ganzzahl |= (1 << i);
-              }
-          }
-          value = (Ganzzahl / 1000.0)*2;
-          if (bits[0]==1){value = value*-1;}
-          datenBereit = false;
-      }  
+        if (scale.is_ready()) {
+            forceN   = scale.get_units(1) * -1;
+            accelDiy = forceN / 10000;
+            }
 
-      if(digitalRead(15)){Calibration();}
+        if (dataReady == true) {
+            count--;
+            uint16_t intValue = 0;
+            for (int16_t i = 0; i < 12; i++) {
+                if (bits[i + 1] == 1) {
+                    intValue |= (1 << i);
+                    }
+                }
+            value = (intValue / 1000.0) * 2;
+            if (bits[0] == 1) {
+                value = value * -1;
+                }
+            dataReady = false;
+            }
 
-      if (millis() - lastSend >= 30) {
-          filtered_accel_y = apply_filter((accel_diy), filtered_y);
-          filter_index = (filter_index + 1) % FILTER_SIZE;
+        if (digitalRead(15)) {
+            calibrate();
+            }
 
-          //BC.sendTelemetryFast("IMU-Acce",value);
-          //BC.sendTelemetryFast("DIY-Acce",filtered_accel_y);
+        if (millis() - lastSend >= 30) {
+            filteredAccelY = applyFilter(accelDiy, filteredY);
+            filterIndex    = (filterIndex + 1) % FILTER_SIZE;
 
-          float t = millis()/1000.0;
+            double t = millis() / 1000.0;
 
-          BC.sendP2P(String(t)+"\t"+String(filtered_accel_y)+"\t"+String(value)+"\r\n");
-          Serial.print(String(t)+"\t"+String(filtered_accel_y)+"\t"+String(value)+"\r\n");
-
-          
-      }      
-    }   
-}
+            BC.sendP2P(String(t) + "\t" + String(filteredAccelY) + "\t" + String(value) + "\r\n");
+            Serial.print(String(t) + "\t" + String(filteredAccelY) + "\t" + String(value) + "\r\n");
+            }
+        }
+    }
